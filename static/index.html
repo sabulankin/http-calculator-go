@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,inital-scale=1"/>
+    <title>HTTP Калькулятор</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width:700px; margin:40px auto; padding:0 16px }
+        input[type="text"] {width:100; padding: 10px; font-size: 18px;}
+        .result {margin-top: 16px; font-size: 18px;}
+    </style>
+</head>
+<body>
+    <h1>Калькулятор (HTTP)</h1>
+    <p> Вводи выражение (пример: <code>100-48</code> или <code>(3+5)*2</code></p>
+
+    <input id="expr" type="text" placeholder="Например: 100-48"/>
+    <button id="caclBtn">Вычислить</button>
+
+    <div class ="result" id="result"></div>
+
+    <audio id="audio" preload="auto"</audio>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -3,17 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"unicode"
 )
-
-type CalcRequest struct {
-	Expr string `json:"expr"`
-}
 
 type CalcResponse struct {
 	Result  float64 `json:"result,omitempty"`
@@ -24,40 +20,38 @@ type CalcResponse struct {
 
 func calculateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Метод не поддерживается. Используй POST.", http.StatusMethodNotAllowed)
+		http.Error(w, "Используй POST", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req CalcRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Ошибка чтения JSON: "+err.Error(), http.StatusBadRequest)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Не удалось прочитать тело запроса", http.StatusBadRequest)
 		return
 	}
 
-	result, err := eval(req.Expr)
+	expr := strings.TrimSpace(string(body))
+	if expr == "" {
+		http.Error(w, "Пустое выражение", http.StatusBadRequest)
+		return
+	}
+
+	result, err := eval(expr)
+
 	resp := CalcResponse{}
 	if err != nil {
 		resp.Error = err.Error()
 	} else {
 		resp.Result = result
-		if almostEq(result, 52.0) {
-			resp.Audio = "/assets/52.mp3"
-			resp.Message = "52 брат"
-		} else if almostEq(result, 4.0) {
-			resp.Audio = "/assets/4.mp3"
-			resp.Message = "ойойой"
-		} else if almostEq(result, 0.0) {
-			resp.Audio = "/assets/0.mp3"
-			resp.Message = "ойойой х2"
-		}
 	}
 
-	w.Header().Set("Conetnt-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
+	w.Header().Set("Content-Type", "application/json")
 
-func almostEq(a, b float64) bool {
-	return math.Abs(a-b) < 1e-9
+	err = json.NewEncoder(w).Encode(resp)
+	if err != nil {
+		return
+	}
+
 }
 
 func main() {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,14 +10,25 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	_ "github.com/lib/pq"
 )
 
 type CalcResponse struct {
+	ID      int64   `json:"id,omitempty"`
 	Result  float64 `json:"result,omitempty"`
 	Error   string  `json:"error,omitempty"`
 	Audio   string  `json:"audio,omitempty"`
 	Message string  `json:"message,omitempty"`
 }
+type Calculation struct {
+	ID         int64   `json:"id"`
+	Expression string  `json:"expression"`
+	Result     float64 `json:"result"`
+	CreatedAt  string  `json:"created_at"`
+}
+
+var db *sql.DB
 
 func calculateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -43,6 +55,15 @@ func calculateHandler(w http.ResponseWriter, r *http.Request) {
 		resp.Error = err.Error()
 	} else {
 		resp.Result = result
+
+		var id int64
+		q := `INSERT INTO calculations (expression, result) VALUES ($1, $2) RETURNING id`
+		if err := db.QueryRow(q, expr, result).Scan(&id); err != nil {
+			resp.Error = "db insert: " + err.Error()
+			resp.Result = 0
+		} else {
+			resp.ID = id
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -53,9 +74,65 @@ func calculateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 }
+func resultsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Используй GET", http.StatusMethodNotAllowed)
+		return
+	}
+
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+
+	if from == "" || to == "" {
+		http.Error(
+			w,
+			"Нужно указать параметры from и to. Пример: /results?from=2026-01-01T00:00:00&to=2030-01-01T00:00:00",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	rows, err := db.Query(`
+		SELECT id, expression, result, created_at
+		FROM calculations
+		WHERE created_at BETWEEN $1 AND $2
+		ORDER BY created_at
+	`, from, to)
+	if err != nil {
+		http.Error(w, "db query: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var list []Calculation
+
+	for rows.Next() {
+		var c Calculation
+		if err := rows.Scan(&c.ID, &c.Expression, &c.Result, &c.CreatedAt); err != nil {
+			http.Error(w, "db scan: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		list = append(list, c)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(list)
+}
 
 func main() {
+	dsn := "postgres://postgres:Beton796255@localhost:5433/calculator_db?sslmode=disable"
+
+	var err error
+	db, err = sql.Open("postgres", dsn)
+	if err != nil {
+		log.Fatal("db open:", err)
+	}
+	if err := db.Ping(); err != nil {
+		log.Fatal("db ping:", err)
+	}
+
 	http.HandleFunc("/calc", calculateHandler)
+	http.HandleFunc("/results", resultsHandler)
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/", fs)
 

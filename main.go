@@ -12,46 +12,55 @@ import (
 )
 
 type CalcResponse struct {
-	Result  float64 `json:"result,omitempty"`
+	Result  float64 `json:"result"`
 	Error   string  `json:"error,omitempty"`
 	Audio   string  `json:"audio,omitempty"`
 	Message string  `json:"message,omitempty"`
 }
 
+type CalcRequest struct {
+	Expr string `json:"expr"`
+}
+
 func calculateHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
 	if r.Method != http.MethodPost {
-		http.Error(w, "Используй POST", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, CalcResponse{Error: "используй POST"})
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Не удалось прочитать тело запроса", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, CalcResponse{Error: "не удалось прочитать тело запроса"})
 		return
 	}
 
-	expr := strings.TrimSpace(string(body))
+	var request CalcRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		writeJSON(w, http.StatusBadRequest, CalcResponse{Error: "тело запроса должно быть JSON с полем expr"})
+		return
+	}
+
+	expr := strings.TrimSpace(request.Expr)
 	if expr == "" {
-		http.Error(w, "Пустое выражение", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, CalcResponse{Error: "пустое выражение"})
 		return
 	}
 
 	result, err := eval(expr)
-
-	resp := CalcResponse{}
 	if err != nil {
-		resp.Error = err.Error()
-	} else {
-		resp.Result = result
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	err = json.NewEncoder(w).Encode(resp)
-	if err != nil {
+		writeJSON(w, http.StatusBadRequest, CalcResponse{Error: err.Error()})
 		return
 	}
 
+	writeJSON(w, http.StatusOK, CalcResponse{Result: result})
+}
+
+func writeJSON(w http.ResponseWriter, status int, response CalcResponse) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func main() {
@@ -59,7 +68,7 @@ func main() {
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/", fs)
 
-	fmt.Println("Серевер запущен на http://localhost:8081")
+	fmt.Println("Сервер запущен на http://localhost:8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
@@ -85,9 +94,6 @@ func tokenize(expr string) ([]string, error) {
 	for i, ch := range expr {
 		if !unicode.IsDigit(ch) && ch != '.' && ch != '+' && ch != '-' && ch != '*' && ch != '/' && ch != '(' && ch != ')' && !unicode.IsSpace(ch) {
 			return nil, fmt.Errorf("недопустимый символ: %q", ch)
-		}
-
-		if unicode.IsDigit(ch) || ch == '.' || ch == '-' && (i == 0) {
 		}
 
 		if unicode.IsDigit(ch) || ch == '.' {
@@ -132,7 +138,7 @@ func shuntingYard(tokens []string) ([]string, error) {
 		} else if tok == "+" || tok == "-" || tok == "*" || tok == "/" {
 			for len(stack) > 0 {
 				top := stack[len(stack)-1]
-				if top == "()" {
+				if top == "(" {
 					break
 				}
 				if prec[top] >= prec[tok] {
@@ -160,7 +166,7 @@ func shuntingYard(tokens []string) ([]string, error) {
 				return nil, fmt.Errorf("несоответствие скобок")
 			}
 		} else {
-			return nil, fmt.Errorf("неизвестный токе: %s", tok)
+			return nil, fmt.Errorf("неизвестный токен: %s", tok)
 		}
 	}
 

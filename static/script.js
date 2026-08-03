@@ -1,33 +1,26 @@
 document.getElementById("calcBtn").addEventListener("click", async () => {
   const expr = document.getElementById("expr").value.trim();
-  if (!expr) return alert("Введите выражение");
+  if (!expr) {
+    alert("Введите выражение");
+    return;
+  }
 
-  const resDiv = document.getElementById("result");
-  resDiv.textContent = "Загрузка...";
+  const result = document.getElementById("result");
+  result.textContent = "Загрузка...";
 
-  try{
-    const resp = await fetch("/calc",{
+  try {
+    const response = await fetch("/calc", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({expr})
     });
-    const data = await resp.json();
-    if (data.error) {
-      resDiv.textContent = "Ошибка: " + data.error;
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      result.textContent = "Ошибка: " + (data.error || response.statusText);
       return;
     }
-    resDiv.textContent = "Результат: " + data.result + (data.message ? (" — " + data.message) : "");
-
-    if (data.audio){
-      const audio = document.getElementById("audio");
-      audio.src = data.audio;
-      try {
-        await audio.play();
-      } catch (err){
-        console.warn("Автовоспроизведение может быть запрещено браузером", err);
-      }
-    }
-  } catch (err) {
-    resDiv.textContent = "Сетевая ошибка: " + err;
+    result.textContent = "Результат: " + data.result;
+  } catch (error) {
+    result.textContent = "Сетевая ошибка: " + error;
   }
 });

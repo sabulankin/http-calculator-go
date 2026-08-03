@@ -1,37 +1,57 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
+
+	_ "github.com/lib/pq"
 )
 
 type CalcResponse struct {
-	Result  float64 `json:"result"`
-	Error   string  `json:"error,omitempty"`
-	Audio   string  `json:"audio,omitempty"`
-	Message string  `json:"message,omitempty"`
+	ID     int64    `json:"id,omitempty"`
+	Result *float64 `json:"result,omitempty"`
+	Error  string   `json:"error,omitempty"`
 }
 
 type CalcRequest struct {
 	Expr string `json:"expr"`
 }
 
-func calculateHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+type Calculation struct {
+	ID         int64     `json:"id"`
+	Expression string    `json:"expression"`
+	Result     float64   `json:"result"`
+	CreatedAt  time.Time `json:"created_at"`
+}
 
+type app struct {
+	db *sql.DB
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (a *app) calculateHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		writeJSON(w, http.StatusMethodNotAllowed, CalcResponse{Error: "используй POST"})
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64*1024))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, CalcResponse{Error: "не удалось прочитать тело запроса"})
 		return
@@ -55,21 +75,107 @@ func calculateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, CalcResponse{Result: result})
+	var id int64
+	const query = `INSERT INTO calculations (expression, result) VALUES ($1, $2) RETURNING id`
+	if err := a.db.QueryRowContext(r.Context(), query, expr, result).Scan(&id); err != nil {
+		log.Printf("insert calculation: %v", err)
+		writeJSON(w, http.StatusInternalServerError, CalcResponse{Error: "не удалось сохранить результат"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, CalcResponse{ID: id, Result: &result})
 }
 
-func writeJSON(w http.ResponseWriter, status int, response CalcResponse) {
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(response)
+func (a *app) resultsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, CalcResponse{Error: "используй GET"})
+		return
+	}
+
+	from, err := time.Parse(time.RFC3339, r.URL.Query().Get("from"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, CalcResponse{Error: "параметр from должен быть в формате RFC3339"})
+		return
+	}
+	to, err := time.Parse(time.RFC3339, r.URL.Query().Get("to"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, CalcResponse{Error: "параметр to должен быть в формате RFC3339"})
+		return
+	}
+	if from.After(to) {
+		writeJSON(w, http.StatusBadRequest, CalcResponse{Error: "параметр from не может быть позже to"})
+		return
+	}
+
+	const query = `
+		SELECT id, expression, result, created_at
+		FROM calculations
+		WHERE created_at BETWEEN $1 AND $2
+		ORDER BY created_at`
+	rows, err := a.db.QueryContext(r.Context(), query, from, to)
+	if err != nil {
+		log.Printf("query calculations: %v", err)
+		writeJSON(w, http.StatusInternalServerError, CalcResponse{Error: "не удалось получить результаты"})
+		return
+	}
+	defer rows.Close()
+
+	list := make([]Calculation, 0)
+	for rows.Next() {
+		var calculation Calculation
+		if err := rows.Scan(
+			&calculation.ID,
+			&calculation.Expression,
+			&calculation.Result,
+			&calculation.CreatedAt,
+		); err != nil {
+			log.Printf("scan calculation: %v", err)
+			writeJSON(w, http.StatusInternalServerError, CalcResponse{Error: "не удалось прочитать результаты"})
+			return
+		}
+		list = append(list, calculation)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("iterate calculations: %v", err)
+		writeJSON(w, http.StatusInternalServerError, CalcResponse{Error: "не удалось прочитать результаты"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, list)
 }
 
 func main() {
-	http.HandleFunc("/calc", calculateHandler)
-	fs := http.FileServer(http.Dir("./static"))
-	http.Handle("/", fs)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("DATABASE_URL is required")
+	}
 
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		log.Fatal("db open: ", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		log.Fatal("db ping: ", err)
+	}
+
+	application := &app{db: db}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/calc", application.calculateHandler)
+	mux.HandleFunc("/results", application.resultsHandler)
+	mux.Handle("/", http.FileServer(http.Dir("./static")))
+
+	server := &http.Server{
+		Addr:              ":8081",
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	fmt.Println("Сервер запущен на http://localhost:8081")
-	log.Fatal(http.ListenAndServe(":8081", nil))
+	log.Fatal(server.ListenAndServe())
 }
 
 func eval(expr string) (float64, error) {
@@ -219,6 +325,7 @@ func evalRPN(tokens []string) (float64, error) {
 	}
 	return stack[0], nil
 }
+
 func isNumber(s string) bool {
 	_, err := strconv.ParseFloat(s, 64)
 	return err == nil

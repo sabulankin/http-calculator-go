@@ -44,32 +44,86 @@ func TestEvalErrors(t *testing.T) {
 	}
 }
 
-func TestCalculateHandler(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/calc", strings.NewReader(`{"expr":"(3+5)*2"}`))
-	recorder := httptest.NewRecorder()
-
-	calculateHandler(recorder, request)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+func TestCalculateHandlerRejectsInvalidRequests(t *testing.T) {
+	application := &app{}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid JSON", body: `not-json`},
+		{name: "empty expression", body: `{"expr":" "}`},
+		{name: "invalid expression", body: `{"expr":"1/0"}`},
 	}
 
-	var response CalcResponse
-	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if response.Result != 16 {
-		t.Fatalf("result = %v, want 16", response.Result)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/calc", strings.NewReader(tt.body))
+			response := httptest.NewRecorder()
+
+			application.calculateHandler(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+			}
+			if got := response.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+				t.Fatalf("Content-Type = %q", got)
+			}
+			var payload CalcResponse
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if payload.Error == "" {
+				t.Fatal("expected error message")
+			}
+		})
 	}
 }
 
-func TestCalculateHandlerRejectsInvalidRequest(t *testing.T) {
-	request := httptest.NewRequest(http.MethodPost, "/calc", strings.NewReader(`{"expr":"1/0"}`))
-	recorder := httptest.NewRecorder()
+func TestResultsHandlerValidatesDateRangeBeforeDatabaseAccess(t *testing.T) {
+	application := &app{}
+	tests := []string{
+		"/results",
+		"/results?from=bad&to=2026-01-02T00:00:00Z",
+		"/results?from=2026-01-03T00:00:00Z&to=2026-01-02T00:00:00Z",
+	}
 
-	calculateHandler(recorder, request)
+	for _, target := range tests {
+		t.Run(target, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, target, nil)
+			response := httptest.NewRecorder()
 
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+			application.resultsHandler(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
+func TestHandlersRejectUnsupportedMethods(t *testing.T) {
+	application := &app{}
+	tests := []struct {
+		handler http.HandlerFunc
+		target  string
+		method  string
+		allow   string
+	}{
+		{handler: application.calculateHandler, target: "/calc", method: http.MethodGet, allow: http.MethodPost},
+		{handler: application.resultsHandler, target: "/results", method: http.MethodPost, allow: http.MethodGet},
+	}
+
+	for _, tt := range tests {
+		request := httptest.NewRequest(tt.method, tt.target, nil)
+		response := httptest.NewRecorder()
+
+		tt.handler(response, request)
+
+		if response.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s status = %d, want %d", tt.method, tt.target, response.Code, http.StatusMethodNotAllowed)
+		}
+		if got := response.Header().Get("Allow"); got != tt.allow {
+			t.Fatalf("Allow = %q, want %q", got, tt.allow)
+		}
 	}
 }
